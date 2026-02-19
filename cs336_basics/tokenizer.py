@@ -323,17 +323,10 @@ class BPETokenizer:
                         self.pair_freq[(seq_list[pos], seq_list[pos+1])] = old_freq + self.char_seq_freq[seq]
                         self.pair_positions[(seq_list[pos], seq_list[pos+1])][tuple(seq_list)].append(pos)
         
-        print(new_pair_position)
+        # print(new_pair_position)
         # print(self.pair_freq)
-        self.print_pair_position("no")
-        # print(self.pair_positions[pair])
-
-        
-        # self.pair_positions[]
-
-            
-            
-            
+        # self.print_pair_position("no")
+      
             
 
             
