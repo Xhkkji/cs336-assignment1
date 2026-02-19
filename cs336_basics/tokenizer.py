@@ -134,17 +134,29 @@ class BPETokenizer:
         self.freq = {}
         self.dic_word2num = {}
         self.char_seq_freq = {}  # 将单词拆解为单个字符，key为该单词的频率转换后：{('l','o','w','</w>'): 1, ...}
-        self.pair_freq = {}  # 储存所有的字节对与频率
+        self.pair_freq = defaultdict(int)  # 储存所有的字节对与频率
         # key:一个列表，[单词索引，字符索引]
-        self.pair_positions:dict[tuple[str, str], list[tuple[int, int]]] = {}  # 记录字节对位置
+        # self.pair_positions:dict[tuple[str, str], list[tuple[int, int]]] = {}  # 记录字节对位置
         # self.pair_positions: dict[tuple[str, str], list[tuple[int, list[int]]]] = defaultdict(list)
-
+        self.pair_positions = defaultdict(lambda: defaultdict(list))
         
         # 堆优化
         self.heap = []
         # 惰性删除，用于标记某字符对是否有效，避免在heap中搜索性删除
         self.heap_entries:dict[tuple[str, str], any] = {}
         
+    def print_pair_position(self, pair):
+        print("print self.pair_position..")
+        if pair == "no":
+            for pair, seq in self.pair_positions.items():
+                print(f'pair:{pair}')
+                print(f'seq:{seq}')
+        else:
+            if pair in self.pair_positions:
+                print(f'seq:{self.pair_positions[pair]}')
+            else:
+                print("no pair!")
+    
     
     def add_word_pos(self, word_bytes: bytes, position: int):
         """添加一个单词的出现位置"""
@@ -219,10 +231,11 @@ class BPETokenizer:
             for i in range(len(char_list) - 1):
                 pair = (char_list[i], char_list[i + 1])
                 self.pair_freq[pair] = self.pair_freq.get(pair, 0) + freq  # get是一个安全取值的函数
-                if pair not in self.pair_positions:
-                    self.pair_positions[pair] = []
+                # if pair not in self.pair_positions:
+                #     self.pair_positions[pair] = []
                 # self.pair_positions[pair].append((self.word_pos[char_str], i))
-                self.pair_positions[pair].append((char_seq, i))
+                # self.pair_positions[pair].append((char_seq, i))
+                self.pair_positions[pair][char_seq].append(i)
 
         # print(f'pair_positions:{self.pair_positions}')
         # for key, value in self.pair_positions.items():
@@ -262,7 +275,7 @@ class BPETokenizer:
         """合并字节对并更新索引"""
         """以下操作针对全体单词中指定的一个pair"""
         new_token = pair[0] + pair[1]
-        print(new_token)
+        # print(new_token)
         if pair not in self.pair_freq or not self.pair_freq[pair]:
             return 0
         
@@ -273,20 +286,50 @@ class BPETokenizer:
         # seq_idx = self.pair_positions[pair]
         # print(f'seq_idx:{seq_idx}')
         # print(f'self.pair_positions:{self.pair_positions}')
-        for seq, pair_pos in self.pair_positions[pair]:
+        new_pair_position = defaultdict(list)
+        # print(self.pair_positions[pair])
+        for seq, pair_pos in self.pair_positions[pair].items():
             # seq:('▁', 'w', 'i', 'd', 'e', 's', 't', '</w>')
             # 修改seq，即对char_seq进行合并操作
             seq_list = list(seq)
             # 针对一个单词中重复出现同一个pair的情况
+            pair_pos.sort(reverse=True)
             
-            # 执行合并
-            seq_list[pair_pos] = new_token
-            del seq_list[pair_pos + 1]
+            for pos in pair_pos:
+                # 执行合并
+                seq_list[pos] = new_token
+                del seq_list[pos + 1]
             
-            # 更新pair_position需要考虑新元素的左右pair的值
+            
+            # 合并后，更新所有pair相关信息
+            # # 寻找new_token位置,并删除原先的pair频率
+            if pair in self.pair_freq:
+                del self.pair_freq[pair]
+            # 更新pair_position
+            if pair in self.pair_positions:
+                del self.pair_positions[pair]
+                
+            # print(self.pair_freq)
+            for pos in range(len(seq_list)):
+                if seq_list[pos] == new_token:
+                    new_pair_position[tuple(seq_list)].append(pos)
+                    # 更新pair_freq
+                    if pos > 0:
+                        old_freq = self.pair_freq.get((seq_list[pos-1], seq_list[pos]), 0)
+                        self.pair_freq[(seq_list[pos-1], seq_list[pos])] = old_freq + self.char_seq_freq[seq]
+                        self.pair_positions[(seq_list[pos-1], seq_list[pos])][tuple(seq_list)].append(pos-1)
+                    if pos < len(seq_list)-1:
+                        old_freq = self.pair_freq.get((seq_list[pos], seq_list[pos+1]), 0)
+                        self.pair_freq[(seq_list[pos], seq_list[pos+1])] = old_freq + self.char_seq_freq[seq]
+                        self.pair_positions[(seq_list[pos], seq_list[pos+1])][tuple(seq_list)].append(pos)
         
+        print(new_pair_position)
+        # print(self.pair_freq)
+        self.print_pair_position("no")
+        # print(self.pair_positions[pair])
+
         
-        print(self.pair_positions[pair])
+        # self.pair_positions[]
 
             
             
