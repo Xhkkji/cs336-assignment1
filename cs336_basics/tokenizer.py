@@ -6,13 +6,16 @@ import os
 from typing import BinaryIO
 import heapq
 from collections import defaultdict
+import json
+
 
 class ComparablePair:
     """可比较的pair包装类"""
+
     def __init__(self, pair: tuple[str, str], count: int):
         self.pair = pair
         self.count = count
-    
+
     def __lt__(self, other):
         """定义小于比较（用于堆排序）"""
         if self.count != other.count:
@@ -20,16 +23,18 @@ class ComparablePair:
             return self.count > other.count
         else:
             # 频率相同时，字典序大的优先
+            # print(f'self.pair[0] + self.pair[1]:{self.pair[0] + self.pair[1]}, other.pair[0] + other.pair[1]:{other.pair[0] + other.pair[1]}')
+            # print(f'self.pair[0] + self.pair[1]) > (other.pair[0] + other.pair[1]:{(self.pair[0] + self.pair[1]) > (other.pair[0] + other.pair[1])}')
             return (self.pair[0] + self.pair[1]) > (other.pair[0] + other.pair[1])
-    
+
     def __eq__(self, other):
         return self.count == other.count and self.pair == other.pair
 
 
 def find_chunk_boundaries(
-    file: BinaryIO,
-    desired_num_chunks: int,
-    split_special_token: bytes,
+        file: BinaryIO,
+        desired_num_chunks: int,
+        split_special_token: bytes,
 ) -> list[int]:
     """
     Chunk the file into parts that can be counted independently.
@@ -72,7 +77,10 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
+
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
 # PAT用法：
 # text_example = "some text that i'll pre-tokenize"
 # # 使用 finditer 遍历匹配项
@@ -82,7 +90,7 @@ PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s
 
 # print(max([("A", "B"), ("A", "C"), ("B", "ZZ"), ("BA", "A")]))
 
-def pretokenize(text:str) -> list[bytes]:
+def pretokenize(text: str) -> list[bytes]:
     # 使用正则表达式进行预分词
     match_tokens = re.finditer(PAT, text)
     str_tokens = [match.group() for match in match_tokens]
@@ -90,7 +98,8 @@ def pretokenize(text:str) -> list[bytes]:
     # print(byte_tokens)
     return byte_tokens
 
-def Parallelizing_chunking(path:str):
+
+def Parallelizing_chunking(path: str):
     with open(path, "rb") as f:
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -108,7 +117,10 @@ def Parallelizing_chunking(path:str):
             chunks.append(chunk)
         return chunks
 
+
 text = "some text that i'll pre-tokenize"
+
+
 class BPETokenizer:
     # def __init__(self, vocab_size: int, special_tokens: list[str] | None = None):
     def __init__(self, vocab_size: int, special_tokens: list[str]):
@@ -139,12 +151,17 @@ class BPETokenizer:
         # self.pair_positions:dict[tuple[str, str], list[tuple[int, int]]] = {}  # 记录字节对位置
         # self.pair_positions: dict[tuple[str, str], list[tuple[int, list[int]]]] = defaultdict(list)
         self.pair_positions = defaultdict(lambda: defaultdict(list))
-        
+
         # 堆优化
         self.heap = []
         # 惰性删除，用于标记某字符对是否有效，避免在heap中搜索性删除
-        self.heap_entries:dict[tuple[str, str], any] = {}
-        
+        self.heap_entries: dict[tuple[str, str], any] = {}
+
+        self.special_tokens = special_tokens
+        self.vocab_size = vocab_size
+        self.vocab = {}
+        self.merges = []
+
     def print_pair_position(self, pair):
         print("print self.pair_position..")
         if pair == "no":
@@ -156,15 +173,22 @@ class BPETokenizer:
                 print(f'seq:{self.pair_positions[pair]}')
             else:
                 print("no pair!")
-    
-    
+
     def add_word_pos(self, word_bytes: bytes, position: int):
         """添加一个单词的出现位置"""
         word_chars = word_bytes.decode('UTF-8')
         if word_chars not in self.word_pos:
             self.word_pos[word_chars] = []
         self.word_pos[word_chars].append(position)
-        
+
+    def add_heap(self, pair, count):
+        if count > 1:
+            item = ComparablePair(pair, count)
+            entry = [count, pair]
+            # 默认最小堆,自定义为最大堆
+            heapq.heappush(self.heap, item)
+            self.heap_entries[pair] = entry
+
     def pretoken(self, input_path: str):
         """
         input_path: str Path to a text file with BPE tokenizer training data.
@@ -184,8 +208,7 @@ class BPETokenizer:
                 # 添加位置信息
                 self.add_word_pos(token_bytes, pos)
         # print(f'self.word_pos: {self.word_pos}')
-        
-        
+
         # 将单词分解为字符，并添加结束标记</w>，同时保留前导空格信息
         for token_bytes, freq in self.dic_word2num.items():
             # print(token_bytes, freq)
@@ -195,26 +218,25 @@ class BPETokenizer:
                 chars.append('</w>')
                 self.char_seq_freq[tuple(chars)] = freq
                 continue
-            
+
             token = token_bytes.decode()  # 将字节串转换为字符串
             chars = []
-    
+
             if token.startswith(' '):  # 有前导空格
                 chars.append('▁')
                 token = token.lstrip()  # 去掉前导空格，替换为下划线
-            
+
             # 添加字符和结束标记
             chars.extend(list(token))
             chars.append('</w>')
-            
+
             # 保存为元组
             self.char_seq_freq[tuple(chars)] = freq
             # {('l', 'o', 'w', '</w>'): 1, ('▁', 'l', 'o', 'w', '</w>'): 4}
         # print(self.char_seq_freq)
         # print(f'self.dic_word2num_len:{len(self.dic_word2num)}')
         # print(f'char_seq_len:{len(self.char_seq_freq)}')
-        
-           
+
         # 统计字节对频率
         # for char_seq, freq in self.char_seq_freq.items():
         #     print(char_seq, freq)
@@ -240,18 +262,18 @@ class BPETokenizer:
         # print(f'pair_positions:{self.pair_positions}')
         # for key, value in self.pair_positions.items():
         #     print(key, value)
-        
+
         # 添加到堆
         for pair, count in self.pair_freq.items():
-            # 只添加计数大于1的对
-            if count > 1:
-                item = ComparablePair(pair, count)
-                entry = [count, pair]
-                # 默认最小堆,自定义为最大堆
-                heapq.heappush(self.heap, item)
-                self.heap_entries[pair] = entry
-        
-        
+            self.add_heap(pair, count)
+            # # 只添加计数大于1的对
+            # if count > 1:
+            #     item = ComparablePair(pair, count)
+            #     entry = [count, pair]
+            #     # 默认最小堆,自定义为最大堆
+            #     heapq.heappush(self.heap, item)
+            #     self.heap_entries[pair] = entry
+
     def get_most_frequent(self) -> tuple[str, str]:
         """快速返回频率最高的字节对，跳过已被合并的无效条目"""
         while self.heap:
@@ -261,7 +283,7 @@ class BPETokenizer:
             if pair not in self.heap_entries:
                 heapq.heappop(self.heap)
                 continue
-            
+
             current_count = self.pair_freq.get(pair, 0)
             if current_count == pair_count and current_count > 1:
                 return pair
@@ -270,15 +292,15 @@ class BPETokenizer:
                 heapq.heappop(self.heap)
                 if pair in self.heap_entries:
                     del self.heap_entries[pair]
-            
-    def merge_pair(self, pair: tuple[str, str], new_token: str) -> int:
+
+    def merge_pair(self, pair: tuple[str, str]) -> int:
         """合并字节对并更新索引"""
         """以下操作针对全体单词中指定的一个pair"""
         new_token = pair[0] + pair[1]
         # print(new_token)
         if pair not in self.pair_freq or not self.pair_freq[pair]:
             return 0
-        
+
         # 按序列和位置分组
         merge_count = 0
 
@@ -286,51 +308,70 @@ class BPETokenizer:
         # seq_idx = self.pair_positions[pair]
         # print(f'seq_idx:{seq_idx}')
         # print(f'self.pair_positions:{self.pair_positions}')
-        new_pair_position = defaultdict(list)
-        # print(self.pair_positions[pair])
+
+        new_pair_positions = defaultdict(lambda: defaultdict(list))
         for seq, pair_pos in self.pair_positions[pair].items():
             # seq:('▁', 'w', 'i', 'd', 'e', 's', 't', '</w>')
             # 修改seq，即对char_seq进行合并操作
             seq_list = list(seq)
             # 针对一个单词中重复出现同一个pair的情况
             pair_pos.sort(reverse=True)
-            
+
             for pos in pair_pos:
                 # 执行合并
                 seq_list[pos] = new_token
                 del seq_list[pos + 1]
-            
-            
-            # 合并后，更新所有pair相关信息
-            # # 寻找new_token位置,并删除原先的pair频率
-            if pair in self.pair_freq:
-                del self.pair_freq[pair]
-            # 更新pair_position
-            if pair in self.pair_positions:
-                del self.pair_positions[pair]
-                
+
             # print(self.pair_freq)
+            new_pair_left = ()
+            new_pair_right = ()
             for pos in range(len(seq_list)):
                 if seq_list[pos] == new_token:
-                    new_pair_position[tuple(seq_list)].append(pos)
+                    # new_pair_positions[new_token][tuple(seq_list)].append(pos)
                     # 更新pair_freq
                     if pos > 0:
-                        old_freq = self.pair_freq.get((seq_list[pos-1], seq_list[pos]), 0)
-                        self.pair_freq[(seq_list[pos-1], seq_list[pos])] = old_freq + self.char_seq_freq[seq]
-                        self.pair_positions[(seq_list[pos-1], seq_list[pos])][tuple(seq_list)].append(pos-1)
-                    if pos < len(seq_list)-1:
-                        old_freq = self.pair_freq.get((seq_list[pos], seq_list[pos+1]), 0)
-                        self.pair_freq[(seq_list[pos], seq_list[pos+1])] = old_freq + self.char_seq_freq[seq]
-                        self.pair_positions[(seq_list[pos], seq_list[pos+1])][tuple(seq_list)].append(pos)
-        
+                        new_pair_left = (seq_list[pos - 1], seq_list[pos])
+                        old_freq = self.pair_freq.get(new_pair_left, 0)
+                        # 更新频率信息
+                        self.pair_freq[new_pair_left] = old_freq + self.char_seq_freq[seq]
+                        new_pair_positions[new_pair_left][tuple(seq_list)].append(pos - 1)
+
+                    if pos < len(seq_list) - 1:
+                        new_pair_right = (seq_list[pos], seq_list[pos + 1])
+                        old_freq = self.pair_freq.get(new_pair_right, 0)
+                        self.pair_freq[new_pair_right] = old_freq + self.char_seq_freq[seq]
+                        new_pair_positions[new_pair_right][tuple(seq_list)].append(pos)
+
+                # 更新堆信息
+                self.add_heap(new_pair_left, self.pair_freq[new_pair_left])
+                self.add_heap(new_pair_right, self.pair_freq[new_pair_right])
+            # 更新char_seq_freq
+            self.char_seq_freq[tuple(seq_list)] = self.char_seq_freq[seq]
+            if seq in self.char_seq_freq:
+                del self.char_seq_freq[seq]
+
+        # 合并pair_position
+        self.pair_positions = defaultdict(lambda: defaultdict(list))
+        self.pair_freq = defaultdict(int)
+        for char_seq, freq in self.char_seq_freq.items():
+            # print(f'char_seq:{char_seq}, freq:{freq}')
+            char_list = list(char_seq)
+            for i in range(len(char_list) - 1):
+                new_pair = (char_list[i], char_list[i + 1])
+                self.pair_freq[new_pair] = self.pair_freq.get(new_pair, 0) + freq  # get是一个安全取值的函数
+                self.pair_positions[new_pair][char_seq].append(i)
+
+        # 合并后，更新所有pair相关信息
+        # # 寻找new_token位置,并删除原先的pair频率
+        # if pair in self.pair_freq:
+        #     del self.pair_freq[pair]
+
+        if pair in self.heap_entries:
+            self.heap_entries[pair] = None
+
         # print(new_pair_position)
         # print(self.pair_freq)
         # self.print_pair_position("no")
-      
-            
-
-            
-    
 
     def train(self, input_path: str):
         # 预分词
@@ -338,28 +379,99 @@ class BPETokenizer:
         # print(self.pair_freq)
         # print(len(self.pair_freq))
         # print(max(self.pair_freq.items(), key=lambda x: x[1]))
-        merged_pair = self.get_most_frequent()
-        # print(f'pair_freq:{self.pair_freq}')
-        # print(f"merged_pair:{merged_pair}")
-        self.merge_pair(merged_pair, "2")
-        
-        
-        
-        
-        num_merges = 10
-        merges = []
-        while(len(self.pair_freq) < num_merges):
-        # 统计哪两个字符对出现的频率最高，进行合并，更新char_seq_freq和pair_freq，直到达到预设的vocab_size
-            
-            best_pair = max(self.pair_freq.items(), key=lambda x: x[1])
-            # print(best_pair)
-            
-            # 若所有频率都清空，已经合并完毕，则停止
-            if(not stats):
+
+        vocab = {}
+        # 1. 初始化vocab：所有字节 (0-255)
+        for i in range(256):
+            self.vocab[i] = bytes([i])
+        next_id = 256
+        # 2. 添加特殊token到vocab
+        for token in self.special_tokens:
+            self.vocab[next_id] = token.encode('utf-8')
+            next_id += 1
+        # 3. 训练过程中，每次合并产生新token时
+        #    将新token加入vocab
+        merged_pair = ()
+        # while len(vocab) < self.vocab_size and self.heap:
+        for i in tqdm(range(self.vocab_size)):
+            if len(vocab) >= self.vocab_size or not self.heap:
                 break
-            
-            
-            
+            # 统计哪两个字符对出现的频率最高，进行合并，更新char_seq_freq和pair_freq，直到达到预设的vocab_size
+            merged_pair = self.get_most_frequent()
+            if not merged_pair:
+                break
+
+            self.merge_pair(merged_pair)
+            self.merges.append(merged_pair)
+            self.vocab[next_id] = merged_pair
+            next_id += 1
+            # print(f'merged_pair:{merged_pair}')
+            # print(self.merges)
+            # self.print_pair_position('no')
+            # 若所有频率都清空，已经合并完毕，则停止
+        # print(f'merged_pair:{merged_pair}')
+        # print(f'vocab:{self.vocab}')
+        # with open('vocab_output.txt', 'w', encoding='utf-8') as f:
+        #     f.write(f'vocab:{self.vocab}')
+
+        converted_dict = {}
+        for key, value in self.vocab.items():
+            # 转换键
+            if isinstance(key, bytes):
+                key = key.decode('utf-8', errors='ignore')
+            # 转换值
+            if isinstance(value, bytes):
+                value = value.decode('utf-8', errors='ignore')
+            elif isinstance(value, list):
+                # 如果值是列表，处理列表中的 bytes
+                value = [
+                    item.decode('utf-8', errors='ignore') if isinstance(item, bytes) else item
+                    for item in value
+                ]
+
+            converted_dict[key] = value
+        vocab_serializable = converted_dict
+        with open('vocab_output.json', 'w', encoding='utf-8') as f:
+            json.dump({
+                'vocab': vocab_serializable,
+                'size': len(vocab_serializable)
+            }, f, ensure_ascii=False, indent=2)
+
+
+# class Tokenizer:
+#     def __init__(self, vocab, merges, special_tokens=None):
+#         self.vocab = vocab
+#         self.merges = merges
+#         self.special_tokens = special_tokens
+#
+#     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+#         """
+#         parameters:
+#         vocab_filepath: str
+#         merges_filepath: str
+#         special_tokens: list[str] | None = None
+#         """
+#         # cls 指向 Tokenizer 类本身
+#         print(f"正在使用类: {cls.__name__}")
+#
+#         # 从文件加载数据
+#         vocab = load_vocab(vocab_filepath)
+#         merges = load_merges(merges_filepath)
+#
+#         # 创建并返回类的实例
+#         return cls(vocab, merges, special_tokens)
+#
+#     def encode(self, text: str) -> list[int]:
+#
+#
+#
+#     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+#
+#
+#     def decode(self, ids: list[int]) -> str:
+
+
+
 
 # print(pretokenize(text_example))
 
