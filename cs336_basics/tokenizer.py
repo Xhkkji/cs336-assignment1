@@ -7,7 +7,7 @@ from typing import BinaryIO
 import heapq
 from collections import defaultdict
 import json
-
+from typing import Iterable, Iterator
 
 class ComparablePair:
     """可比较的pair包装类"""
@@ -123,7 +123,7 @@ text = "some text that i'll pre-tokenize"
 
 class BPETokenizer:
     # def __init__(self, vocab_size: int, special_tokens: list[str] | None = None):
-    def __init__(self, vocab_size: int, special_tokens: list[str]):
+    def __init__(self, vocab_size: int, special_tokens: list[str] | None = None):
         """
         vocab_size: int A positive integer that defines the maximum final vocabulary size (including the
             initial byte vocabulary, vocabulary items produced from merging, and any special tokens).
@@ -140,7 +140,7 @@ class BPETokenizer:
         """
         # 用于储存词对对应的出现次数，比如((l,o):5)
         self.dic_wordnear2num = dict[tuple[bytes], int]
-
+        self.chunks = []
         # self.word_pos: dict[tuple[str, ...], list[tuple[str, int]]] = {}  # 储存所有单词的位置
         self.word_pos = {}  # 储存所有单词的位置
         self.freq = {}
@@ -160,7 +160,63 @@ class BPETokenizer:
         self.special_tokens = special_tokens
         self.vocab_size = vocab_size
         self.vocab = {}
+        self.vocab_reversed = {}
         self.merges = []
+
+        # tokenizer需要的变量
+        # 初始化
+        self.vocab_itos = {}
+        self.vocab_stoi = {}
+        self.merged_word = {}  # 储存已经编码完成的单词的int序列
+        self.char_word = {}
+        self.text_int_tokens = []
+
+    @classmethod
+    def from_files(cls, vocab, merges, special_tokens=None):
+        """
+        parameters:
+        vocab_filepath: str
+        merges_filepath: str
+        special_tokens: list[str] | None = None
+        """
+        vocab = vocab.get('vocab', {})
+        # 1. 调用构造函数创建实例（传入 vocab_size=len(vocab)）
+        instance = cls(vocab_size=len(vocab), special_tokens=special_tokens)
+        # print(f'len:{len(vocab)}')
+        # print(f'vocab:{vocab}')
+        # print(f'merges:{merges}')
+        # 从文件加载数据
+        instance.vocab_itos = instance.get_vocab_itos(vocab)
+        instance.vocab_stoi = instance.get_vocab_stoi(vocab)
+        instance.merges = merges
+
+        # print(f'vocab:{instance.vocab_itos}')
+        # print(f'vocab:{instance.vocab_stoi}')
+        # print(f'merges:{instance.merges}')
+
+        # 创建并返回类的实例
+        return instance
+
+    def get_vocab_itos(self, vocab):
+        data = vocab
+        vocab_itos = {}
+        # 转换为以整数为键的字典
+        for key, value in data.items():
+            int_key = int(key)  # 将字符串key转为整数
+            vocab_itos[int_key] = ''.join(value)  # 值保持为列表
+        # print(f'vocab_itos:{vocab_itos}')
+        return vocab_itos
+
+    def get_vocab_stoi(self, vocab):
+        data = vocab
+        vocab_stoi = {}
+        # 转换为以整数为键的字典
+        for key, value in data.items():
+            int_key = int(key)  # 将字符串key转为整数
+            vocab_stoi[''.join(value)] = int_key  # 值保持为列表
+        # print(f'vocab_stoi:{vocab_stoi}')
+        return vocab_stoi
+
 
     def print_pair_position(self, pair):
         print("print self.pair_position..")
@@ -195,6 +251,7 @@ class BPETokenizer:
         """
         # print(input_path)
         chunks = Parallelizing_chunking(input_path)
+        self.chunks = chunks
         # print(f'chunks: {chunks}')
         for c in chunks:
             for pos, token_bytes in enumerate(c):
@@ -384,10 +441,12 @@ class BPETokenizer:
         # 1. 初始化vocab：所有字节 (0-255)
         for i in range(256):
             self.vocab[i] = bytes([i])
+            self.vocab_reversed[bytes([i]).decode('latin-1')] = i
         next_id = 256
         # 2. 添加特殊token到vocab
         for token in self.special_tokens:
             self.vocab[next_id] = token.encode('utf-8')
+            self.vocab_reversed[token.encode('utf-8')] = next_id
             next_id += 1
         # 3. 训练过程中，每次合并产生新token时
         #    将新token加入vocab
@@ -404,17 +463,24 @@ class BPETokenizer:
             self.merge_pair(merged_pair)
             self.merges.append(merged_pair)
             self.vocab[next_id] = merged_pair
+            self.vocab_reversed[str(merged_pair[0]+merged_pair[1])] = next_id
             next_id += 1
             # print(f'merged_pair:{merged_pair}')
             # print(self.merges)
             # self.print_pair_position('no')
             # 若所有频率都清空，已经合并完毕，则停止
-        # print(f'merged_pair:{merged_pair}')
+
+    def get_vocab(self):
+        """
+        保存并获取两个词汇表和merges
+        """
+        # print(f'self.merges:{self.merges}')
         # print(f'vocab:{self.vocab}')
         # with open('vocab_output.txt', 'w', encoding='utf-8') as f:
         #     f.write(f'vocab:{self.vocab}')
 
         converted_dict = {}
+        converted_switch_dict = {}
         for key, value in self.vocab.items():
             # 转换键
             if isinstance(key, bytes):
@@ -428,7 +494,6 @@ class BPETokenizer:
                     item.decode('utf-8', errors='ignore') if isinstance(item, bytes) else item
                     for item in value
                 ]
-
             converted_dict[key] = value
         vocab_serializable = converted_dict
         with open('vocab_output.json', 'w', encoding='utf-8') as f:
@@ -437,66 +502,275 @@ class BPETokenizer:
                 'size': len(vocab_serializable)
             }, f, ensure_ascii=False, indent=2)
 
+        # 转换为列表（JSON兼容）
+        merges_serializable = [list(item) for item in self.merges]
+        # 保存为JSON
+        with open('merges_output.json', 'w', encoding='utf-8') as f:
+            json.dump({
+                'merges': merges_serializable,
+                'count': len(merges_serializable)
+            }, f, ensure_ascii=False, indent=2)
 
-# class Tokenizer:
-#     def __init__(self, vocab, merges, special_tokens=None):
-#         self.vocab = vocab
-#         self.merges = merges
-#         self.special_tokens = special_tokens
-#
-#     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
-#         """
-#         parameters:
-#         vocab_filepath: str
-#         merges_filepath: str
-#         special_tokens: list[str] | None = None
-#         """
-#         # cls 指向 Tokenizer 类本身
-#         print(f"正在使用类: {cls.__name__}")
-#
-#         # 从文件加载数据
-#         vocab = load_vocab(vocab_filepath)
-#         merges = load_merges(merges_filepath)
-#
-#         # 创建并返回类的实例
-#         return cls(vocab, merges, special_tokens)
-#
-#     def encode(self, text: str) -> list[int]:
-#
-#
-#
-#     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-#
-#
-#     def decode(self, ids: list[int]) -> str:
+        # 创建一个新字典，把所有键转为字符串
+        safe_dict = {}
+        for k, v in self.vocab_reversed.items():
+            # 如果键是bytes，解码为字符串
+            if isinstance(k, bytes):
+                str_key = k.decode('latin-1')  # latin-1不会出错
+            else:
+                str_key = str(k)
+            safe_dict[str_key] = v
+
+        # 保存
+        with open('vocab_reversed.json', 'w', encoding='utf-8') as f:
+            json.dump(safe_dict, f, ensure_ascii=False, indent=2)
+
+        print(f"已保存 {len(safe_dict)} 项到 vocab_reversed.json")
+        print(f"Saved {len(self.vocab)} vocabs")
+        print(f"Saved {len(merges_serializable)} merges")
+
+        return self.vocab, self.vocab_reversed, self.merges
+
+    def encode_single_word(self, word):
+        word_str = word.decode('utf-8')  # 变成 " low"
+        word_char = ()
+        if word_str[0] == ' ':
+            word_char = ('_',) + tuple(word_str[1:]) + ('</w>',)
+        else:
+            word_char = tuple(word_str[:]) + ('</w>',)
+        word_char = list(word_char)
+        word_int_list = []
+        while (1):
+            merged = False
+            for i in range(len(word_char) - 1):
+                pair = (word_char[i], word_char[i + 1])
+                # print(f'pair:{pair}')
+                # print(f'self.merges:{self.merges}')
+                if pair in self.merges:
+                    # print(f'pair:{pair}')
+                    new_word = pair[0] + pair[1]
+                    word_char[i] = new_word
+                    del word_char[i + 1]
+                    merged = True
+                    # print(f'word_char:{word_char}')
+                    break
+            if not merged:
+                break
+
+        for token in word_char:
+            if token in self.vocab_stoi:
+                word_int_list.append(self.vocab_stoi[token])
+        return word_int_list
+
+    def encode(self, text: str) -> list[int]:
+        """
+        该过程需要用到merges和vocab
+        先利用merges对单词进行合并，然后利用vocab进行查表
+        """
+        chunks = pretokenize(text)
+        # print(f'chunk:{chunks}')
+        all_tokens = []
+        for c in chunks:
+            result = self.encode_single_word(c)
+            all_tokens.extend(result)
+            self.text_int_tokens.extend(result)
+        return all_tokens
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for line in iterable:
+            chunks = pretokenize(line)
+            # print(f'chunk:{chunks}')
+            for c in chunks:
+                word_tokens = self.encode_single_word(c)
+                for token in word_tokens:
+                    yield token  # 逐个、连续地返回所有的单词token
+
+    def decode(self, ids: list[int]) -> str:
+        result = []
+        for token in ids:
+            result.extend(self.vocab_itos[token])
+        result = ''.join(result)
+
+        # 处理特殊字符
+        # 1. 将 </w> 替换为空格（表示词边界）
+        result = result.replace('</w>', '')
+        # 2. 将 '_' 替换为空格（或者保留？取决于设计）
+        result = result.replace('_', ' ')
+        return result
 
 
+def load_vocab(json_path):
+    """
+        从JSON文件加载vocab，并可选地恢复原始数据类型
+
+        Args:
+            json_path: JSON文件路径
+
+        Returns:
+            vocab: 恢复后的vocab字典
+            size: vocab大小
+        """
+    # # 读取JSON文件
+    # with open(json_path, 'r', encoding='utf-8') as f:
+    #     data = json.load(f)
+    #
+    # vocab_str = data['vocab']
+    # size = data['size']
+    #
+    # # 如果需要恢复原始数据类型（将字符串转回bytes等）
+    # vocab_original = {}
+    # for key, value in vocab_str.items():
+    #     # 键通常是整数，不需要转换
+    #     # 但如果是其他类型，可能需要根据实际情况处理
+    #     if isinstance(value, str):
+    #         vocab_original[int(key) if key.isdigit() else key] = value.encode('utf-8')
+    #     elif isinstance(value, list):
+    #         vocab_original[int(key) if key.isdigit() else key] = [
+    #             item.encode('utf-8') if isinstance(item, str) else item
+    #             for item in value
+    #         ]
+    #     else:
+    #         vocab_original[int(key) if key.isdigit() else key] = value
+
+    # 传入reversed，直接使用
+    with open(json_path, 'r', encoding='utf-8') as f:
+        vocab = json.load(f)
+
+    return vocab
+
+def load_merges(json_path):
+    # 从JSON文件读取
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # 获取merges数据（现在是列表的列表）
+    merges_as_lists = data['merges']
+    count = data['count']
+
+    # 如果需要恢复为元组格式
+    merges = [tuple(item) for item in merges_as_lists]
+    return merges
+
+def test_empty(BPEtokenizer):
+    text = ""
+    ids = BPEtokenizer.encode(text)
+    decoded = BPEtokenizer.decode(ids)
+    print(f"空字符串: '{text}' -> {ids} -> '{decoded}'")
+    assert ids == []
+    assert decoded == ""
+
+def test_single_ascii(tokenizer):
+    text = "a"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
+    print(f"单字符: '{text}' -> {ids} -> '{decoded}'")
+    assert decoded == text  # 应该能还原
+
+def test_english_word(tokenizer):
+    texts = ["hello", "world", "test"]
+    for text in texts:
+        ids = tokenizer.encode(text)
+        decoded = tokenizer.decode(ids)
+        print(f"单词 '{text}': {ids} -> '{decoded}'")
+        assert decoded == text
+
+def test_chinese(tokenizer):
+    text = "你好"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
+    print(f"中文 '{text}': {ids} -> '{decoded}'")
+    assert decoded == text
+
+def test_sentence():
+    text = "hello world"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
+    print(f"句子 '{text}': {ids} -> '{decoded}'")
+    assert decoded == text
+
+def test_special_tokens():
+    special = "<|endoftext|>"
+    text = f"hello{special}world"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
+    print(f"特殊token '{text}': {ids} -> '{decoded}'")
+    assert decoded == text
+
+def test_multiple_special():
+    special1 = "<|endoftext|>"
+    special2 = "<|pad|>"
+    text = f"{special1}hello{special2}world{special1}"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode(ids)
+    print(f"多个特殊token: {ids} -> '{decoded}'")
+    assert decoded == text
 
 
-# print(pretokenize(text_example))
+def run_all_tests(tokenizer):
+    tests = [
+        ("空字符串", "", []),
+        ("单字符a", "a", None),
+        ("单字符z", "z", None),
+        ("单词hello", "hello", None),
+        ("中文'你好'", "你好", None),
+        ("句子", "hello world", None),
+        ("带特殊token", "<|endoftext|>hello<|endoftext|>", None),
+    ]
 
-path = "../data/TinyStoriesV2-GPT4-valid.txt"
+    for name, text, expected_ids in tests:
+        print(f"\n=== 测试: {name} ===")
+        print(f"输入: '{text}'")
+
+        ids = tokenizer.encode(text)
+        print(f"编码: {ids}")
+
+        decoded = tokenizer.decode(ids)
+        print(f"解码: '{decoded}'")
+
+        if decoded == text:
+            print("✅ 往返测试通过")
+        else:
+            print("❌ 往返测试失败")
+
+        if expected_ids is not None:
+            if ids == expected_ids:
+                print("✅ ID匹配")
+            else:
+                print(f"❌ ID不匹配, 期望 {expected_ids}")
+
+
+path = "/home/xhk/cs336/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
 test_path = "./test.txt"
-test = "low low low low low lower lower widest widest widest newest newest newest newest newest newest"
+test = "low low low low low low low low low low low low lower lower widest widest widest newest newest newest newest newest newest estest estest"
 # chunks = Parallelizing_chunking(path)
 # print(chunks)
 
-tokenizer = BPETokenizer(vocab_size=1000, special_tokens=["<|endoftext|>", "<|pad|>"])
-tokenizer.train(test_path)
+special_token = ["<|endoftext|>", "<|pad|>", "</w>"]
 
-# freq = {}
-# dic_word2num = {}
-# pre_test = pretokenize(test)
-# print(test)
-# words = test.split()
-# print(words)
-# dic_word2num = {}
+# BPEtokenizer = BPETokenizer(vocab_size=1000, special_tokens=special_token)
+# BPEtokenizer.train(path)
+# vocab, vocab_switch, merges = BPEtokenizer.get_vocab()
+vocab = load_vocab('/home/xhk/cs336/assignment1-basics/cs336_basics/vocab_output.json')
+merges = load_merges('/home/xhk/cs336/assignment1-basics/cs336_basics/merges_output.json')
+BPEtokenizer = BPETokenizer.from_files(vocab, merges, special_token)
+# test_empty(BPEtokenizer)
+# test_single_ascii(BPEtokenizer)
 
-# for word in words:
-#     # 直接创建字节元组
-#     # print(word)
-#     # print(type(word))
-#     chars_tuple = tuple(bytes([ord(ch)]) for ch in word)
-#     print(chars_tuple)
-#     dic_word2num[chars_tuple] = dic_word2num.get(chars_tuple, 0) + 1
-# print(dic_word2num)
+
+run_all_tests(BPEtokenizer)
+
+# token_ids = BPEtokenizer.encode(test)
+# print(BPEtokenizer.decode(token_ids))
+# print(f'self.merges:{merges}')
+# print(f'vocab:{vocab}')
+# print(f'vocab:{vocab_switch}')
+
+# # tokenizer = Tokenizer(vocab, merges, [])
+# tokenizer = Tokenizer.from_files('vocab_reversed.json', 'merges_output.json', special_token)
+# tokenizer.get_vocab_itos('vocab_output.json')
+# # tokenizer.load_data(test_path)
+# # print(tokenizer.vocab)
+
+# token_int = tokenizer.encode(test)
+# print(tokenizer.text_int_tokens)
+# print(tokenizer.decode(token_int))
